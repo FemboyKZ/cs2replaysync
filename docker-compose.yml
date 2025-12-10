@@ -1,0 +1,19 @@
+services:
+  cs2-replaysync:
+    image: cs2replaysync
+    container_name: cs2-replaysync
+    restart: unless-stopped
+    tty: true
+    stdin_open: true
+    env_file:
+      - .env
+    volumes:
+      # Mount your local replay directory
+      - /home/local-user/mounts/kzreplays:/data/replays
+      # Optional: persist SSH known_hosts for SFTP connections
+      - ./ssh:/root/.ssh:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: 3

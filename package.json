@@ -1,0 +1,14 @@
+{
+    "name": "cs2replaysync",
+    "version": "1.0.0",
+    "main": "main.js",
+    "author": "jvnipers",
+    "license": "MIT",
+    "description": "Async script to sync up cs2kz replay files between hosts using s/ftp.",
+    "scripts": {
+        "start": "node main.js"
+    },
+    "dependencies": {
+        "dotenv": "^17.2.3"
+    }
+}
