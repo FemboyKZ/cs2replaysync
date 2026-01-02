@@ -258,6 +258,37 @@ async function getRemoteFiles(hostState) {
   return files;
 }
 
+async function getRemoteFileSize(hostState, filename) {
+  const { protocol, user, password, host, path: remotePath } = hostState.remote;
+  try {
+    // Use ls -la for exact byte size (cls --size returns KB on some FTP servers)
+    // Must cd first, then ls
+    const output = await executeLftp(protocol, user, password, host, 
+      `cd "${remotePath}"
+ls -la "${filename}"`);
+    // Parse ls -la output: "-rw-r--r-- 1 user group SIZE date time filename"
+    const parts = output.trim().split(/\s+/);
+    if (parts.length >= 5) {
+      const size = parseInt(parts[4], 10);
+      if (!isNaN(size)) {
+        return size;
+      }
+    }
+    return null;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function getLocalFileSize(filePath) {
+  try {
+    const stat = await fs.stat(filePath);
+    return stat.size;
+  } catch (err) {
+    return null;
+  }
+}
+
 async function downloadArchiveIndex(hostState) {
   const { protocol, user, password, host, path: remotePath } = hostState.remote;
   const tempFile = path.join(os.tmpdir(), `archive_index_${hostState.hostId}.txt`);
@@ -300,10 +331,30 @@ async function uploadFiles(hostState, UUIDs) {
       continue;
     }
     
+    const localFilePath = path.join(CONFIG.localPath, `${UUID}.replay`);
+    const localSize = await getLocalFileSize(localFilePath);
+    
+    if (localSize === null) {
+      log(`Cannot read local file for upload: ${UUID}`, hostState.hostId);
+      continue;
+    }
+    
     try {
       await withRetry(async () => {
-        const commands = `cd "${remotePath}"\nput "${path.join(CONFIG.localPath, `${UUID}.replay`)}"`;
+        const commands = `cd "${remotePath}"\nput "${localFilePath}"`;
         await executeLftp(protocol, user, password, host, commands);
+
+        const remoteSize = await getRemoteFileSize(hostState, `${UUID}.replay`);
+        if (remoteSize === null) {
+          throw new Error('Failed to verify remote file after upload');
+        }
+        if (remoteSize !== localSize) {
+          try {
+            await executeLftp(protocol, user, password, host, `rm -f "${remotePath}/${UUID}.replay"`);
+          } catch (cleanupErr) {
+          }
+          throw new Error(`Size mismatch after upload: local=${localSize}, remote=${remoteSize}`);
+        }
       }, CONFIG.fileRetryCount, CONFIG.fileRetryDelayMs, `Upload ${UUID}`);
       successCount++;
     } catch (err) {
@@ -332,25 +383,54 @@ async function downloadFiles(hostState, UUIDs) {
         continue;
       }
       
+      // Get remote size for verification (optional - don't skip if unavailable)
+      const remoteSize = await getRemoteFileSize(hostState, `${UUID}.replay`);
+      
+      const tempFilePath = path.join(tempDir, `${UUID}.replay`);
+      
       try {
         await withRetry(async () => {
-          const commands = `cd "${remotePath}"\nget "${UUID}.replay" -o "${tempDir}/${UUID}.replay"`;
+          await fs.unlink(tempFilePath).catch(() => {});
+          
+          const commands = `cd "${remotePath}"\nget "${UUID}.replay" -o "${tempFilePath}"`;
           await executeLftp(protocol, user, password, host, commands);
+          
+          const downloadedSize = await getLocalFileSize(tempFilePath);
+          if (downloadedSize === null) {
+            throw new Error('Downloaded file not found or inaccessible');
+          }
+          if (downloadedSize === 0) {
+            await fs.unlink(tempFilePath).catch(() => {});
+            throw new Error('Downloaded file is empty');
+          }
+          // Only verify size if we could determine remote size beforehand
+          if (remoteSize !== null && downloadedSize !== remoteSize) {
+            await fs.unlink(tempFilePath).catch(() => {});
+            throw new Error(`Size mismatch after download: expected=${remoteSize}, got=${downloadedSize}`);
+          }
         }, CONFIG.fileRetryCount, CONFIG.fileRetryDelayMs, `Download ${UUID}`);
         
         try {
-          const srcPath = path.join(tempDir, `${UUID}.replay`);
           const destPath = path.join(CONFIG.localPath, `${UUID}.replay`);
           // Use copyFile + unlink instead of rename to handle cross-device moves
-          await fs.copyFile(srcPath, destPath);
+          await fs.copyFile(tempFilePath, destPath);
+          
+          const tempSize = await getLocalFileSize(tempFilePath);
+          const finalSize = await getLocalFileSize(destPath);
+          if (finalSize !== tempSize) {
+            await fs.unlink(destPath).catch(() => {});
+            throw new Error(`Final copy size mismatch: temp=${tempSize}, final=${finalSize}`);
+          }
+          
           await fs.chmod(destPath, 0o644);
-          await fs.unlink(srcPath).catch(() => {});
+          await fs.unlink(tempFilePath).catch(() => {});
           downloaded++;
         } catch (err) {
           log(`Failed to move ${UUID}: ${err.message}`, hostState.hostId);
         }
       } catch (err) {
         log(`Failed to download ${UUID} after ${CONFIG.fileRetryCount} attempts: ${err.message}`, hostState.hostId);
+        await fs.unlink(tempFilePath).catch(() => {});
       }
     }
     
