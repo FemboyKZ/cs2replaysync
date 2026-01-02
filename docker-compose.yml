@@ -9,7 +9,7 @@ services:
       - .env
     volumes:
       # Mount your local replay directory
-      - /home/local-user/mounts/kzreplays:/data/replays
+      - /home/cs2-fkz/mounts/kzreplays:/data/replays
       # Optional: persist SSH known_hosts for SFTP connections
       - ./ssh:/root/.ssh:ro
     logging:
