@@ -6,6 +6,10 @@ RUN apk add --no-cache lftp openssh-client bash
 # Create app directory
 WORKDIR /app
 
+# Copy package files and install dependencies
+COPY package.json ./
+RUN npm install --production
+
 # Copy the sync script
 COPY main.js . 
 
